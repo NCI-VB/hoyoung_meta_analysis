@@ -1,0 +1,152 @@
+---
+title: "Meta-analysis vignette"
+author: "Matthew Angel"
+date: "12/13/2021"
+output:
+  html_document:
+    toc: true
+    fig_crop: false
+    dev: png
+---
+
+This workflow was produced by following https://ebmh.bmj.com/content/22/4/153
+
+How to perform a meta-analysis with R: a practical tutorial
+Sara Balduzzi, Gerta Rücker, Guido Schwarzer
+Correspondence to Dr Sara Balduzzi, Institute of Medical Biometry and Statistics, Faculty of Medicine and Medical Center - University of Freiburg, Freiburg im Breisgau 79085, Germany; balduzzi@imbi.uni-freiburg.de
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE) 
+
+# Install required CRAN packages
+list.of.packages <- c("meta","metasens")
+new.packages <- list.of.packages[!(list.of.packages %in% installed.packages()[,"Package"])]
+if(length(new.packages)) install.packages(new.packages)
+
+# Install required Bioconductor packages
+list.of.bioc.packages <- c() # empty vector
+if (!requireNamespace("BiocManager", quietly = TRUE))
+    install.packages("BiocManager")
+new.bioc.packages <- list.of.bioc.packages[!(list.of.bioc.packages %in% installed.packages()[,"Package"])]
+if(length(new.bioc.packages)) BiocManager::install(new.bioc.packages)
+
+# Load libraries
+suppressMessages(library("meta"))
+suppressMessages(library("metasens"))
+```
+
+# Read in data
+
+```{r read_data}
+
+  # read file if exists, otherwise, download and save
+  if(file.exists("data/joy.txt")){
+    joy <- read.csv("data/joy.txt")
+  }else{
+    joy <- read.csv("https://ebmh.bmj.com/content/ebmental/22/4/153/DC1/embed/inline-supplementary-material-1.txt")
+    write.table(joy, file = "data/joy.txt", sep = ",", row.names = FALSE, quote = FALSE)
+  }
+
+  joy
+
+```
+
+# Preprocessing
+
+```{r preprocessing}
+
+  # Some studies have participants with missing information due to drop outs (variables drop.h and drop.p). Later, we want to conduct a subgroup analysis of studies with and without missing data and therefore add a new variable with this information to the dataset:
+  
+  joy$miss <- ifelse((joy$drop.h + joy$drop.p) == 0, # Test expression
+                    "Without missing data", # Value if TRUE
+                    "With missing data") #Value if FALSE
+  
+  
+  joy
+
+```
+
+# Fixed effect and random effects meta-analysis
+
+```{r meta_analysis}
+
+  m.publ = metabin(event.e = resp.h, # Number of events in experimental group
+                   n.e = resp.h + fail.h, # Number of total observations in experimental group
+                   event.c = resp.p, # Number of events in control group
+                   n.c = resp.p + fail.p, #Number of total observations in control group
+                   data = joy, # data.frame containing data
+                   studlab = paste0(author, "(", year, ")"), # Vector with study labels
+                   method.tau = "PM") # method used to estimate the between-study variance tau^2 and its square root(tau). Paule-Mandel estimator used here
+  
+  m.publ
+
+```
+
+# Forest plot
+
+```{r forest_plot, fig.height = 6, fig.width = 10}
+  # Note: had to play with fig options in chunk vars to get this to print correctly
+  forest(m.publ, sortvar = year, prediction = TRUE, label.left = "Favors placebo", label.right = "Favors haloperidol", )
+  
+```
+
+# Assessing the impact of missing outcome data
+
+```{r missing_data}
+
+  m.publ.sub <- update(m.publ, subgroup = miss, print.subgroup.name =FALSE) 
+
+  m.publ.sub
+```
+
+# Assessing and accounting for small-study effects
+
+## Funnel Plot
+
+```{r small_study}
+
+  # Sometimes small studies show different, often larger, treatment effects compared with the large ones. The association between size and effect in meta-analysis is referred to as small-study effects.
+  # 
+  # The first step to assess the presence of small-study effects is usually to have a look at the funnel plot, where effect estimates are plotted against a measure of precision, usually the SE of the effect estimate. This can be done through the function funnel.meta
+  funnel(m.publ)
+
+  # An asymmetric funnel plot indicates that small-study effects are present. Publication bias, though the most popular, is only one of several possible reasons for asymmetry.20 A contour-enhanced funnel plot may help to distinguish if asymmetry is due to publication bias, by adding lines representing regions where a test of treatment effect is significant. In order to generate such a contour-enhanced funnel plot, the argument contour.levels must be specified:
+  funnel(m.publ, contour.levels = c(0.9, 0.95, 0.99), col.contour = c("darkgray", "gray", "lightgray"))
+```
+
+## Harbor score test
+
+```{r harbor_score}
+
+  # Several tests, often referred to as tests for small-study effects or tests for funnel plot asymmetry, have been proposed to assess whether the association between estimated effects and study size is larger than might be expected by chance.20 22 These tests typically have low power, meaning that even when they do not support the presence of asymmetry, bias cannot be excluded. Accordingly, they should be used only if the number of included studies is 10 or larger.20 The Harbord score test, where the test statistic is based on a weighted linear regression of the efficient score on its SE,23 is applied in this example:
+
+  metabias(m.publ, method.bias = "score")
+
+```
+
+## Assymetry correction
+
+```{r trim_and_fill}
+
+  # Once the presence of asymmetry in the funnel plot has been detected, it is also possible to conduct sensitivity analyses to adjust the effect estimate for this bias. Different methods exist; in this paper, we report the more established trim-and-fill method and the method of adjusting by regression. Another more advanced method is the Copas selection model, which we do not treat here.
+  # 
+  # The trim-and-fill method, 1) removes/“trims” studies from the funnel plot until it becomes symmetric 2) adds/“fills” mirror images of removed studies (ie, unpublished studies) to the original funnel plot and 3) calculates the adjusted effect estimate based on original and added studies. The function to apply is trimfill:
+
+  tf.publ = trimfill(m.publ)
+
+  summary(tf.publ)
+  
+  funnel(tf.publ)
+  
+```
+
+## Limit meta-analysis
+
+```{r limit_meta_analysis}
+
+  # A specific implementation of the “adjusting by regression” method, called “limit meta-analysis”, is described in detail in ref 25. The underlying model, motivated by Egger’s test,20 is an extended random effects model with an additional parameter alpha representing possible small study effects (funnel plot asymmetry) by allowing the treatment effect to depend on the SE. More explicitly, alpha is the expected shift in the standardised treatment effect if precision is very small. The model provides an adjusted treatment effect estimate that is interpreted as the limit treatment effect for a study with infinite precision. Graphically, this means adding to the funnel plot a curve from the bottom to a point at the top which marks the adjusted treatment effect estimate. The corresponding function is:
+
+  l1.publ = limitmeta(m.publ)
+
+  funnel(l1.publ) 
+```
